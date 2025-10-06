@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Rust Server Stats</title>
+<style>
+  :root{--bg:#0b0f16;--card:#111827;--muted:#9ca3af;--text:#e5e7eb;--acc:#14b8a6;--border:#1f2937;--shadow:0 10px 24px rgba(0,0,0,.35)}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  header{padding:28px}
+  h1{margin:0 0 10px 0;font-weight:800;letter-spacing:.5px}
+  .sub{color:var(--muted);font-size:.95rem}
+  .wrap{padding:0 24px 40px;max-width:1200px;margin:0 auto}
+  .grid{display:grid;gap:18px}
+  .section{background:var(--card);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow)}
+  .section h2{margin:18px 18px 0;font-weight:800}
+  .section .hint{margin:6px 18px 0;color:var(--muted);font-size:.9rem}
+  table{width:100%;border-collapse:collapse;margin-top:12px}
+  th,td{padding:12px 14px;border-top:1px solid var(--border);text-align:left;white-space:nowrap}
+  th{color:#d1d5db;font-weight:700;user-select:none;cursor:pointer}
+  th.sortable:hover{color:#fff}
+  th .dir{opacity:.7;font-size:.85em;margin-left:4px}
+  tbody tr:hover{background:#0e1522}
+  .mono{font-family:ui-monospace,Consolas,Menlo,monospace}
+  .pill{display:inline-block;background:#09121f;border:1px solid var(--border);padding:2px 8px;border-radius:999px;color:var(--muted);font-size:.8rem;margin-left:10px}
+  .topbar{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+  .right{margin-left:auto}
+  a{color:#93c5fd;text-decoration:none}
+  a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Rust Server Stats <span id="status" class="pill">connecting…</span></h1>
+      <div class="right sub">
+  <label style="display:inline-flex;align-items:center;gap:8px">
+    View:
+    <select id="scopeSel">
+      <option value="wipe" selected>Current wipe</option>
+      <option value="lifetime">Lifetime</option>
+    </select>
+  </label>
+  <span id="wipeInfo" class="pill" style="margin-left:12px"></span>
+</div>
+
+  </header>
+
+  <div class="wrap">
+    <div class="grid">
+      <!-- PvP -->
+      <div class="section" id="sec-pvp">
+        <h2>PvP</h2>
+        <div class="hint">Kills, deaths, ammo fired & rockets.</div>
+        <table id="tbl-pvp">
+          <thead>
+            <tr>
+              <th data-k="last_name" class="sortable">Player <span class="dir"></span></th>
+              <th data-k="kills.player" class="sortable">Kills <span class="dir"></span></th>
+              <th data-k="deaths" class="sortable">Deaths <span class="dir"></span></th>
+              <th data-k="bullets.arrow" class="sortable">Arrows <span class="dir"></span></th>
+              <th data-k="bullets.total" class="sortable">Bullets <span class="dir"></span></th>
+              <th data-k="rockets.fired" class="sortable">Rockets <span class="dir"></span></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <!-- PvE -->
+      <div class="section" id="sec-pve">
+        <h2>PvE</h2>
+        <div class="hint">NPCs, Bradleys, Helis, airdrops & hacked crates.</div>
+        <table id="tbl-pve">
+          <thead>
+            <tr>
+              <th data-k="last_name" class="sortable">Player <span class="dir"></span></th>
+              <th data-k="kills.npc" class="sortable">NPC Kills <span class="dir"></span></th>
+              <th data-k="bradley.destroyed" class="sortable">Bradleys <span class="dir"></span></th>
+              <th data-k="heli.destroyed" class="sortable">Helis <span class="dir"></span></th>
+              <th data-k="airdrops.collected" class="sortable">Airdrops <span class="dir"></span></th>
+              <th data-k="hackedcrates.collected" class="sortable">Hacked Crates <span class="dir"></span></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <!-- Resources -->
+      <div class="section" id="sec-res">
+        <h2>Resources</h2>
+        <div class="hint">Totals gathered.</div>
+        <table id="tbl-res">
+          <thead>
+            <tr>
+              <th data-k="last_name" class="sortable">Player <span class="dir"></span></th>
+              <th data-k="gather.wood" class="sortable">Wood <span class="dir"></span></th>
+              <th data-k="gather.stone" class="sortable">Stone <span class="dir"></span></th>
+              <th data-k="gather.metal" class="sortable">Metal Ore <span class="dir"></span></th>
+              <th data-k="gather.hq" class="sortable">HQ Ore <span class="dir"></span></th>
+              <th data-k="barrels.destroyed" class="sortable">Barrels <span class="dir"></span></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <!-- Gambling -->
+      <div class="section" id="sec-gamble">
+        <h2>Gambling</h2>
+        <div class="hint">Spent / Profit by machine.</div>
+        <table id="tbl-gamble">
+          <thead>
+            <tr>
+              <th data-k="last_name" class="sortable">Player <span class="dir"></span></th>
+              <th data-k="casino.bigwheel.spent" class="sortable">Big Wheel Spent <span class="dir"></span></th>
+              <th data-k="casino.bigwheel.profit" class="sortable">Big Wheel Profit <span class="dir"></span></th>
+              <th data-k="casino.slots.spent" class="sortable">Slots Spent <span class="dir"></span></th>
+              <th data-k="casino.slots.profit" class="sortable">Slots Profit <span class="dir"></span></th>
+              <th data-k="casino.blackjack.spent" class="sortable">Blackjack Spent <span class="dir"></span></th>
+              <th data-k="casino.blackjack.profit" class="sortable">Blackjack Profit <span class="dir"></span></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <!-- Misc -->
+      <div class="section" id="sec-misc">
+        <h2>Misc</h2>
+        <div class="hint">Distance travelled & highest range kill.</div>
+        <table id="tbl-misc">
+          <thead>
+            <tr>
+              <th data-k="last_name" class="sortable">Player <span class="dir"></span></th>
+              <th data-k="distance.m" class="sortable">Distance (km) <span class="dir"></span></th>
+              <th data-k="highest_range_kill.m" class="sortable">Highest Range Kill (m) <span class="dir"></span></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // ----- Auto API base via reverse proxy (/api -> backend) -----
+  const API_BASE = '/api';
+
+  let SCOPE = localStorage.getItem("scope") || "wipe";
+  const scopeSel = document.getElementById("scopeSel");
+  scopeSel.value = SCOPE;
+  scopeSel.addEventListener("change", () => {
+    SCOPE = scopeSel.value;
+    localStorage.setItem("scope", SCOPE);
+    loadAll();
+  });
+
+
+  const $ = (s, el=document) => el.querySelector(s);
+  const $$ = (s, el=document) => Array.from(el.querySelectorAll(s));
+
+  const PVP_KEYS = ["kills.player","deaths","bullets.arrow","bullets.pistol","bullets.rifle","bullets.shotgun","bullets.nail","rockets.fired"];
+  const RES_KEYS = ["gather.wood","gather.stone","gather.metal","gather.hq","barrels.destroyed"];
+  const GAMBLE_KEYS = [
+    "casino.bigwheel.spent","casino.bigwheel.profit",
+    "casino.slots.spent","casino.slots.profit",
+    "casino.blackjack.spent","casino.blackjack.profit"
+  ];
+  const PVE_KEYS = [
+  "kills.npc",
+  "bradley.destroyed",
+  "heli.destroyed",
+  "airdrops.collected",
+  "hackedcrates.collected",
+];
+
+  const MISC_KEYS = ["distance.m","highest_range_kill.m"];
+
+  // fetch helpers (reads are public, no API key needed)
+  async function jget(path){
+    const url = API_BASE + path + (path.includes("?") ? "&" : "?") + "scope=" + encodeURIComponent(SCOPE);
+    const r = await fetch(url, { cache: "no-store" });
+      if(!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r.json();
+  }
+
+  async function loadHeader(){
+    try{
+      const meta = await jget(`/health`);
+      const started = meta.wipe_started || 0;
+      const el = document.getElementById("wipeInfo");
+      if (SCOPE === "wipe" && started){
+        const d = new Date(started * 1000);
+        el.textContent = `Wipe since ${d.toLocaleDateString()} ${d.toLocaleTimeString()}`;
+        el.style.display = "inline-block";
+      } else {
+        el.textContent = SCOPE === "lifetime" ? "Lifetime totals" : "";
+        el.style.display = SCOPE === "lifetime" ? "inline-block" : "none";
+      }
+    } catch { /* ignore */ }
+  }
+
+
+  async function lb(key){
+    try { return await jget(`/leaderboard/${encodeURIComponent(key)}`); }
+    catch(e){ console.error("lb", key, e); return []; }
+  }
+  async function mergeKeys(keys){
+    const map = new Map();
+    for (const key of keys){
+      const rows = await lb(key);
+      for (const r of rows){
+        const uid = r.user_id;
+        if(!map.has(uid)) map.set(uid, { user_id: uid, last_name: r.last_name || String(uid), counters: {} });
+        const obj = map.get(uid);
+        obj.last_name = obj.last_name || r.last_name;
+        obj.counters[key] = Number(r.value||0);
+      }
+    }
+    return Array.from(map.values());
+  }
+
+  function fmtNum(x){ return (x==null||isNaN(x)) ? "0" : (Math.round((+x)*100)/100).toLocaleString(); }
+  function km(x){ return fmtNum((+x)/1000); }
+
+  const sortStates = {
+    pvp:   { key: "kills.player", dir: "desc" },
+    res:   { key: "gather.wood", dir: "desc" },
+    gamble:{ key: "casino.bigwheel.profit", dir: "desc" },
+    misc:  { key: "distance.m", dir: "desc" },
+    pve:   { key: "kills.npc",              dir: "desc" },
+  };
+
+  function renderTable(tbl, rows, colSpec, state){
+    const tbody = $("tbody", tbl); tbody.innerHTML = "";
+    const arr = rows.map(r=>{
+      const d = {...r};
+      const c = r.counters || {};
+      d["bullets.total"] = (c["bullets.pistol"]||0)+(c["bullets.rifle"]||0)+(c["bullets.shotgun"]||0)+(c["bullets.nail"]||0);
+      return d;
+    });
+
+    const k = state.key, dir = state.dir;
+    arr.sort((a,b)=>{
+      const av = (k==="last_name") ? (a.last_name||"") : (a.counters?.[k] ?? a[k] ?? 0);
+      const bv = (k==="last_name") ? (b.last_name||"") : (b.counters?.[k] ?? b[k] ?? 0);
+      if (typeof av === "string" || typeof bv === "string"){
+        return dir==="asc" ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+      }
+      return dir==="asc" ? (av-bv) : (bv-av);
+    });
+
+    for (const r of arr){
+      const tr = document.createElement("tr");
+      for (const col of colSpec){
+        const td = document.createElement("td");
+        if (col.k==="last_name"){ td.textContent = r.last_name || r.user_id; }
+        else if (col.k==="distance.m"){ td.textContent = km(r.counters?.[col.k]||0); }
+        else if (col.k==="bullets.total"){ td.textContent = fmtNum(r["bullets.total"]||0); }
+        else { td.textContent = fmtNum(r.counters?.[col.k]||0); }
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+
+    // header sort arrows
+    $$("thead th", tbl).forEach(th=>{
+      const kk = th.dataset.k;
+      th.classList.add("sortable");
+      const span = $(".dir", th);
+      span.textContent = (kk===k) ? (dir==="asc" ? "▲" : "▼") : "";
+    });
+  }
+
+  async function loadPVP(){
+    const rows = await mergeKeys(PVP_KEYS);
+    renderTable($("#tbl-pvp"), rows, [
+      {label:"Player", k:"last_name"},
+      {label:"Kills", k:"kills.player"},
+      {label:"Deaths", k:"deaths"},
+      {label:"Arrows", k:"bullets.arrow"},
+      {label:"Bullets", k:"bullets.total"},
+      {label:"Rockets", k:"rockets.fired"},
+    ], sortStates.pvp);
+  }
+
+  async function loadPVE(){
+    const rows = await mergeKeys(PVE_KEYS);
+    renderTable($("#tbl-pve"), rows, [
+      {label:"Player", k:"last_name"},
+      {label:"NPC Kills", k:"kills.npc"},
+      {label:"Bradleys", k:"bradley.destroyed"},
+      {label:"Helis", k:"heli.destroyed"},
+      {label:"Airdrops", k:"airdrops.collected"},
+      {label:"Hacked Crates", k:"hackedcrates.collected"},
+    ], sortStates.pve);
+  }
+
+  async function loadRes(){
+    const rows = await mergeKeys(RES_KEYS);
+    renderTable($("#tbl-res"), rows, [
+      {label:"Player", k:"last_name"},
+      {label:"Wood", k:"gather.wood"},
+      {label:"Stone", k:"gather.stone"},
+      {label:"Metal Ore", k:"gather.metal"},
+      {label:"HQ Ore", k:"gather.hq"},
+      {label:"Barrels", k:"barrels.destroyed"},
+    ], sortStates.res);
+  }
+  async function loadGamble(){
+    const rows = await mergeKeys(GAMBLE_KEYS);
+    renderTable($("#tbl-gamble"), rows, [
+      {label:"Player", k:"last_name"},
+      {label:"Big Wheel Spent", k:"casino.bigwheel.spent"},
+      {label:"Big Wheel Profit", k:"casino.bigwheel.profit"},
+      {label:"Slots Spent", k:"casino.slots.spent"},
+      {label:"Slots Profit", k:"casino.slots.profit"},
+      {label:"Blackjack Spent", k:"casino.blackjack.spent"},
+      {label:"Blackjack Profit", k:"casino.blackjack.profit"},
+    ], sortStates.gamble);
+  }
+  async function loadMisc(){
+    const rows = await mergeKeys(MISC_KEYS);
+    renderTable($("#tbl-misc"), rows, [
+      {label:"Player", k:"last_name"},
+      {label:"Distance (km)", k:"distance.m"},
+      {label:"Highest Range Kill (m)", k:"highest_range_kill.m"},
+    ], sortStates.misc);
+  }
+
+  async function loadAll(){
+    $("#status").textContent = "loading…";
+    try{
+      await Promise.all([loadPVP(), loadPVE(), loadRes(), loadGamble(), loadMisc()]);
+      $("#status").textContent = "live";
+      $("#status").style.color = "#10b981";
+    }catch(e){
+      console.error(e);
+      $("#status").textContent = "error";
+      $("#status").style.color = "#ef4444";
+    }
+  }
+
+  // sorting by clicking headers
+  function attachSorting(){
+    const bind = (tblId, state) => {
+      $$("#"+tblId+" thead th").forEach(th=>{
+        th.addEventListener("click", ()=>{
+          const k = th.dataset.k; if(!k) return;
+          state.dir = (state.key===k && state.dir==="desc") ? "asc" : (state.key===k && state.dir==="asc" ? "desc" : "desc");
+          state.key = k;
+          if (tblId==="tbl-pvp") loadPVP();
+          else if (tblId==="tbl-res") loadRes();
+          else if (tblId==="tbl-gamble") loadGamble();
+          else if (tblId==="tbl-misc") loadMisc();
+          else if (tblId==="tbl-pve") loadPVE();
+        });
+      });
+    };
+    bind("tbl-pvp", sortStates.pvp);
+    bind("tbl-res", sortStates.res);
+    bind("tbl-gamble", sortStates.gamble);
+    bind("tbl-misc", sortStates.misc);
+    bind("tbl-pve",    sortStates.pve);
+  }
+
+  // boot
+  attachSorting();
+  loadAll();                    // auto connect + load
+  setInterval(loadAll, 10000);  // auto refresh every 10s
+})();
+</script>
+</body>
+</html>
