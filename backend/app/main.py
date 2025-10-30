@@ -51,9 +51,13 @@ def leaderboard(key: str, limit: int = 50, db: Session = Depends(get_session)) -
     rows = crud.top_leaderboard(db, key, limit)
     return [{"user_id": uid, "last_name": name, "value": value} for uid, name, value in rows]
 
-@router.get("/players/search")
-def players_search(q: str = "", limit: int = 20, db: Session = Depends(get_session)) -> List[Dict[str, Any]]:
-    return crud.search_players(db, q, limit)
+@router.get("/players/{user_id}")
+def player_detail(user_id: int, db: Session = Depends(get_session)):
+    p = crud.get_player(db, user_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="player not found")
+    return p
+
 
 
 # ----- Ingest (fixed: flush player BEFORE counters) -----

@@ -98,7 +98,8 @@
               <th data-k="gather.wood" class="sortable">Wood <span class="dir"></span></th>
               <th data-k="gather.stone" class="sortable">Stone <span class="dir"></span></th>
               <th data-k="gather.metal" class="sortable">Metal Ore <span class="dir"></span></th>
-              <th data-k="gather.hq" class="sortable">HQ Ore <span class="dir"></span></th>
+              <th data-k="gather.hq" class="sortable">HQM Ore <span class="dir"></span></th>
+              <th data-k="gather.sulfur" class="sortable">Sulfur Ore <span class="dir"></span></th>
               <th data-k="barrels.destroyed" class="sortable">Barrels <span class="dir"></span></th>
             </tr>
           </thead>
@@ -163,7 +164,7 @@
   const $$ = (s, el=document) => Array.from(el.querySelectorAll(s));
 
   const PVP_KEYS = ["kills.player","deaths","bullets.arrow","bullets.pistol","bullets.rifle","bullets.shotgun","bullets.nail","rockets.fired"];
-  const RES_KEYS = ["gather.wood","gather.stone","gather.metal","gather.hq","barrels.destroyed"];
+  const RES_KEYS = ["gather.wood","gather.stone","gather.metal","gather.hq","gather.sulfur","barrels.destroyed"];
   const GAMBLE_KEYS = [
     "casino.bigwheel.spent","casino.bigwheel.profit",
     "casino.slots.spent","casino.slots.profit",
@@ -307,6 +308,7 @@
       {label:"Stone", k:"gather.stone"},
       {label:"Metal Ore", k:"gather.metal"},
       {label:"HQ Ore", k:"gather.hq"},
+      {label:"Sulfur Ore", k:"gather.sulfur"},
       {label:"Barrels", k:"barrels.destroyed"},
     ], sortStates.res);
   }

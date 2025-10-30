@@ -1,80 +1,67 @@
-// File: RustStatsExporter.cs
+// Reference: Oxide.Core, Oxide.Game.Rust, UnityEngine
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using Newtonsoft.Json;
 using Oxide.Core;
+using Oxide.Core.Libraries;
 using Oxide.Core.Libraries.Covalence;
 using UnityEngine;
+using Rust;
 
 namespace Oxide.Plugins
 {
-    [Info("RustStatsExporter", "Dyls123", "1.0.0")]
-    [Description("Collects per-player gameplay stats and exports them to a web API on a timer.")]
+    [Info("RustStatsExporter", "you", "1.0.0-clean")]
+    [Description("Collects per-player stats and periodically exports them to a web API.")]
     public class RustStatsExporter : CovalencePlugin
     {
-        #region Config
+        // ---------------- Config ----------------
         private class PluginConfig
         {
-            public string ApiUrl = "https://your-api.example.com/ingest";
-            public string ApiKey = ""; // optional
+            public string ApiUrl = "http://127.0.0.1:8000/ingest";
+            public string ApiKey = "tJXYYhqC-r4B9hv_DruWo!2o9.wVUx"; // your key
             public float FlushSeconds = 30f;
             public float DistanceSampleSeconds = 0.5f;
-            public bool LogDebug = false;
+            public bool LogDebug = true;
         }
-
         private PluginConfig _cfg;
 
-        protected override void LoadDefaultConfig()
-        {
-            _cfg = new PluginConfig();
-            SaveConfig();
-        }
-
+        protected override void LoadDefaultConfig() => _cfg = new PluginConfig();
         protected override void LoadConfig()
         {
             base.LoadConfig();
-            try
-            {
-                _cfg = Config.ReadObject<PluginConfig>();
-                if (_cfg == null) throw new Exception("null config");
-            }
+            try { _cfg = Config.ReadObject<PluginConfig>() ?? new PluginConfig(); }
             catch
             {
-                PrintWarning("Config invalid, creating default.");
-                LoadDefaultConfig();
+                PrintWarning("Config invalid; writing defaults.");
+                _cfg = new PluginConfig();
             }
+            SaveConfig();
         }
-
         protected override void SaveConfig() => Config.WriteObject(_cfg, true);
-        #endregion
 
-        #region Data structures
+        // ---------------- Models ----------------
         private class Counters
         {
             public ulong user_id;
             public string last_name;
             public Dictionary<string, double> k = new Dictionary<string, double>();
-            public double highest_range_kill_m = 0.0;
+            public double highest_range_kill_m = 0.0; // kept as max locally
+        }
+        private class Payload
+        {
+            public long server_unix_time;
+            public List<Counters> players;
         }
 
+        // ---------------- State ----------------
         private readonly Dictionary<ulong, Counters> _stats = new Dictionary<ulong, Counters>();
         private readonly Dictionary<ulong, Vector3> _lastPos = new Dictionary<ulong, Vector3>();
-        private Timer _flushTimer;
-        private Timer _distanceTimer;
 
-        // Gambling context tracking (approximation via scrap delta while at the machine)
-        private enum GameCtx { None, BigWheel, Slots, Blackjack }
-        private class GambleState
-        {
-            public GameCtx ctx = GameCtx.None;
-            public int lastScrap = 0;
-            public double spent = 0;
-            public double profit = 0;
-        }
-        private readonly Dictionary<ulong, GambleState> _gamble = new Dictionary<ulong, GambleState>();
-        #endregion
+        private WebRequests _web; // initialized in Init()
 
-        #region Helpers
+        // ---------------- Helpers ----------------
         private Counters Get(ulong id)
         {
             if (!_stats.TryGetValue(id, out var c))
@@ -84,373 +71,305 @@ namespace Oxide.Plugins
             }
             return c;
         }
-
         private void SetName(ulong id, string name)
         {
-            var c = Get(id);
-            c.last_name = name ?? c.last_name;
+            if (id == 0 || string.IsNullOrEmpty(name)) return;
+            Get(id).last_name = name;
         }
-
         private void Add(ulong id, string key, double amt = 1)
         {
+            if (id == 0 || string.IsNullOrEmpty(key) || Math.Abs(amt) < double.Epsilon) return;
             var c = Get(id);
-            if (!c.k.ContainsKey(key)) c.k[key] = 0;
-            c.k[key] += amt;
-            if (_cfg.LogDebug) Puts($"++ {id} {key} +{amt}");
+            c.k[key] = c.k.TryGetValue(key, out var cur) ? cur + amt : amt;
+            if (_cfg.LogDebug) Puts($"[ADD] {id} {key} += {amt} (now {c.k[key]})");
         }
-
-        private static string AmmoBucket(string shortname)
-        {
-            if (string.IsNullOrEmpty(shortname)) return "other";
-            shortname = shortname.ToLowerInvariant();
-            if (shortname.Contains("pistol")) return "pistol";
-            if (shortname.Contains("rifle")) return "rifle";
-            if (shortname.Contains("shotgun") || shortname.Contains("handmade.shell")) return "shotgun";
-            if (shortname.Contains("nailgun") || shortname.Contains("nails")) return "nail";
-            if (shortname.Contains("arrow") || shortname.Contains("bolt")) return "arrow";
-            if (shortname.Contains("rocket")) return "rocket";
-            return "other";
-        }
-
         private static bool IsBarrel(string prefab)
         {
             if (string.IsNullOrEmpty(prefab)) return false;
-            prefab = prefab.ToLowerInvariant();
-            return prefab.Contains("barrel") || prefab.Contains("oil_barrel") || prefab.Contains("loot-barrel");
+            var p = prefab.ToLowerInvariant();
+            return p.Contains("barrel") || p.Contains("oil_barrel") || p.Contains("loot-barrel");
         }
-
-        private GameCtx GuessGameCtxFromEntity(BaseEntity ent)
+        private static string AmmoBucket(string shortname)
         {
-            if (ent == null) return GameCtx.None;
-            var name = ent.ShortPrefabName?.ToLowerInvariant() ?? "";
-            // Names may vary slightly by build; these work broadly:
-            if (name.Contains("spinningwheel") || name.Contains("bigwheel")) return GameCtx.BigWheel;
-            if (name.Contains("slotmachine")) return GameCtx.Slots;
-            if (name.Contains("blackjack") || name.Contains("cardtable")) return GameCtx.Blackjack;
-            return GameCtx.None;
+            if (string.IsNullOrEmpty(shortname)) return "other";
+            var s = shortname.ToLowerInvariant();
+            if (s.Contains("pistol")) return "pistol";
+            if (s.Contains("rifle")) return "rifle";
+            if (s.Contains("shotgun") || s.Contains("handmade.shell")) return "shotgun";
+            if (s.Contains("nailgun") || s.Contains("nails")) return "nail";
+            if (s.Contains("arrow") || s.Contains("bolt")) return "arrow";
+            if (s.Contains("rocket")) return "rocket";
+            return "other";
         }
+        private static string RocketKindFromAmmo(string shortname)
+{
+    if (string.IsNullOrEmpty(shortname)) return null;
+    switch (shortname)
+    {
+        case "ammo.rocket.basic":       return "basic";        // standard explosive
+        case "ammo.rocket.hv":          return "hv";
+        case "ammo.rocket.incendiary":  return "incendiary";
+        case "ammo.rocket.smoke":       return "smoke";
+        default: return null;
+    }
+}
 
-        private GambleState GState(ulong id)
+        private void CountRocketByKind(BasePlayer player, string kind)
         {
-            if (!_gamble.TryGetValue(id, out var s))
-            {
-                s = new GambleState();
-                _gamble[id] = s;
-            }
-            return s;
+            if (player == null || string.IsNullOrEmpty(kind)) return;
+
+            // Always track per-type keys
+            Add(player.userID, $"rockets.{kind}");
+
+            // Maintain legacy "rockets.fired" as **only** standard explosive
+            if (kind == "basic")
+                Add(player.userID, "rockets.fired");
+
+            // (Optional) also keep a grand total if you want later:
+            // Add(player.userID, "rockets.total");
         }
+private static string RocketKindFromEntity(BaseEntity rocket)
+{
+    if (rocket == null) return null;
 
-        private int CountScrap(BasePlayer p)
+    var n = (rocket.ShortPrefabName ?? "").ToLowerInvariant();
+
+    if (n.Contains("rocket_basic"))      return "basic";
+    if (n.Contains("rocket_hv"))         return "hv";
+    if (n.Contains("rocket_incendiary")) return "incendiary";
+    if (n.Contains("rocket_smoke"))      return "smoke";
+
+    return null;
+}
+
+
+
+        // ---------------- Lifecycle ----------------
+        private void Init()
         {
-            if (p?.inventory == null) return 0;
-            // "scrap" shortname
-            int total = 0;
-            var all = ListPool<Item>.Get();
-            p.inventory.AllItemsNoAlloc(ref all);
-            foreach (var it in all)
-            {
-                if (it?.info?.shortname == "scrap") total += it.amount;
-            }
-            ListPool<Item>.Recycle(all);
-            return total;
+            LoadConfig();
+            _web = Interface.Oxide.GetLibrary<WebRequests>("WebRequests");
+
+            // start timers on server init to ensure players list is ready
         }
-
-        private void UpdateGambleDelta(BasePlayer p)
+        private void OnServerInitialized()
         {
-            var id = p.userID;
-            var s = GState(id);
-            if (s.ctx == GameCtx.None) return;
-
-            int scrapNow = CountScrap(p);
-            int delta = scrapNow - s.lastScrap;
-            if (delta != 0)
-            {
-                // negative delta → spent; positive → profit
-                if (delta < 0) s.spent += -delta;
-                if (delta > 0) s.profit += delta;
-
-                // reflect into counters by machine
-                string prefix = s.ctx == GameCtx.BigWheel ? "casino.bigwheel" :
-                                s.ctx == GameCtx.Slots ? "casino.slots" :
-                                "casino.blackjack";
-                if (delta < 0) Add(id, $"{prefix}.spent", -delta);
-                if (delta > 0) Add(id, $"{prefix}.profit", delta);
-
-                s.lastScrap = scrapNow;
-            }
-        }
-
-        private void StartDistanceSampler()
-        {
-            _distanceTimer?.Destroy();
-            _distanceTimer = timer.Every(_cfg.DistanceSampleSeconds, () =>
+            // distance sampler
+            var distIv = Math.Max(0.25f, _cfg.DistanceSampleSeconds);
+            timer.Every(distIv, () =>
             {
                 foreach (var p in BasePlayer.activePlayerList)
                 {
                     if (p == null || !p.IsAlive()) continue;
                     var id = p.userID;
-                    var cur = p.transform.position;
+                    SetName(id, p.displayName);
 
+                    var cur = p.transform.position;
                     if (_lastPos.TryGetValue(id, out var prev))
                     {
-                        float d = Vector3.Distance(prev, cur);
-                        // Ignore teleports / respawns spikes
+                        var d = Vector3.Distance(prev, cur);
                         if (d > 0.05f && d < 50f)
-                        {
                             Add(id, "distance.m", d);
-                        }
                     }
                     _lastPos[id] = cur;
-
-                    // While sampling, also keep an eye on gambling scrap delta
-                    UpdateGambleDelta(p);
                 }
             });
-        }
 
-        private void StartFlushTimer()
-        {
-            _flushTimer?.Destroy();
-            _flushTimer = timer.Every(_cfg.FlushSeconds, FlushAll);
-        }
-        #endregion
+            // periodic flush
+            var flushIv = Math.Max(5f, _cfg.FlushSeconds);
+            timer.Every(flushIv, FlushAll);
 
-        #region Lifecycle
-        private void Init()
-        {
-            StartFlushTimer();
-            StartDistanceSampler();
+            if (_cfg.LogDebug) Puts("RustStatsExporter initialized.");
         }
-
         private void Unload()
         {
-            _flushTimer?.Destroy();
-            _distanceTimer?.Destroy();
             FlushAll();
         }
-        #endregion
 
-        #region Identity
+        // ---------------- Identity ----------------
         private void OnUserConnected(IPlayer player)
         {
             if (player == null) return;
             if (ulong.TryParse(player.Id, out var id))
-            {
                 SetName(id, player.Name);
-            }
+        }
+        private void OnPlayerInit(BasePlayer p)
+        {
+            if (p == null) return;
+            SetName(p.userID, p.displayName);
+            _lastPos[p.userID] = p.transform.position;
         }
 
-        private void OnPlayerRespawned(BasePlayer p) => SetName(p.userID, p.displayName);
-        private void OnServerInitialized()
+// ---------------- Gathering (wood/stone/metal/HQM/sulfur) ----------------
+
+private void AddFromItem(ulong uid, Item item)
+{
+    if (uid == 0 || item == null || item.info == null) return;
+
+    string key = null;
+    switch (item.info.shortname)
+    {
+        case "wood":         key = "gather.wood";   break;
+        case "stones":       key = "gather.stone";  break;
+        case "metal.ore":    key = "gather.metal";  break;
+        case "hq.metal.ore": key = "gather.hq";     break;
+        case "sulfur.ore":   key = "gather.sulfur"; break;
+    }
+
+    if (key != null && item.amount > 0)
+        Add(uid, key, item.amount);
+}
+
+// Default yield tick (trees/ores/animals etc.)
+private void OnDispenserGather(ResourceDispenser dispenser, BaseEntity ent, Item item)
+{
+    var p = ent?.ToPlayer();
+    if (p == null) return;
+    AddFromItem(p.userID, item);
+}
+
+// Bonus yield (weak-spot “sparkle” hits, jackhammer, etc.)
+private void OnDispenserBonus(ResourceDispenser dispenser, BasePlayer player, Item item)
+{
+    if (player == null) return;
+    AddFromItem(player.userID, item);
+}
+
+        // (Optional) Quarry output
+        // Note: this hook exists on uMod/Oxide. If your version doesn't fire it, no harm.
+        /*
+        private void OnQuarryGather(BaseMiningQuarry quarry, Item item)
         {
-            foreach (var p in BasePlayer.activePlayerList)
-                SetName(p.userID, p.displayName);
+            var ownerId = quarry?.OwnerID ?? 0;
+            if (ownerId != 0) AddFromItem(ownerId, item);
         }
-        #endregion
+        */
 
-        #region Gathering
-        private void OnDispenserGather(ResourceDispenser dispenser, BaseEntity ent, Item item)
+        // ---------------- Combat / Kills / Deaths / Barrels / Highest range kill ----------------
+private void OnEntityDeath(BaseCombatEntity victim, HitInfo info)
+{
+    if (victim == null || info == null) return;
+
+    var attacker = info.InitiatorPlayer;
+
+    // ----- Barrels -----
+    if (IsBarrel(victim.ShortPrefabName))
+    {
+        if (attacker != null && attacker.userID != 0 && !attacker.IsNpc)
+            Add(attacker.userID, "barrels.destroyed");
+        return;
+    }
+
+    // ----- Boss vehicles -----
+    if (victim is BradleyAPC)
+    {
+        if (attacker != null && attacker.userID != 0 && !attacker.IsNpc)
+            Add(attacker.userID, "bradley.destroyed");
+        return;
+    }
+    if (victim is BaseHelicopter)
+    {
+        if (attacker != null && attacker.userID != 0 && !attacker.IsNpc)
+            Add(attacker.userID, "heli.destroyed");
+        return;
+    }
+
+    // ----- Players (BasePlayer covers humans and NPCs) -----
+    if (victim is BasePlayer vp)
+    {
+        // NPC player (scientists/tunnel dwellers/etc.)
+        if (vp.IsNpc)
         {
-            var p = ent?.ToPlayer();
-            if (p == null || item == null || item.info == null) return;
-
-            var key = item.info.shortname switch
-            {
-                "wood" => "gather.wood",
-                "stones" => "gather.stone",
-                "metal.ore" => "gather.metal",
-                "hq.metal.ore" => "gather.hq",
-                "scrap" => "gather.scrap",
-                _ => null
-            };
-            if (key != null) Add(p.userID, key, item.amount);
-        }
-
-        private void OnCollectiblePickup(Item item, BasePlayer p)
-        {
-            if (p == null || item?.info == null) return;
-
-            var key = item.info.shortname switch
-            {
-                "wood" => "gather.wood",
-                "stones" => "gather.stone",
-                "metal.ore" => "gather.metal",
-                "hq.metal.ore" => "gather.hq",
-                "scrap" => "gather.scrap",
-                _ => null
-            };
-            if (key != null) Add(p.userID, key, item.amount);
-        }
-        #endregion
-
-        #region Combat / Kills / Deaths / Bosses / Barrels / Highest range kill
-        private void OnEntityDeath(BaseCombatEntity victim, HitInfo info)
-        {
-            if (victim == null || info == null) return;
-            var attacker = info.InitiatorPlayer;
-
-            // Barrels
-            if (IsBarrel(victim.ShortPrefabName))
-            {
-                if (attacker != null) Add(attacker.userID, "barrels.destroyed");
-                return;
-            }
-
-            // Bradley & Helicopter
-            if (victim is BradleyAPC)
-            {
-                if (attacker != null) Add(attacker.userID, "bradley.destroyed");
-                return;
-            }
-            if (victim is BaseHelicopter)
-            {
-                if (attacker != null) Add(attacker.userID, "heli.destroyed");
-                return;
-            }
-
-            // Players
-            var vPlayer = victim as BasePlayer;
-            if (vPlayer != null)
-            {
-                // Count death for the victim if it's a real player (ignore NPC players)
-                if (!vPlayer.IsNpc) Add(vPlayer.userID, "deaths");
-
-                // Player-on-player kill
-                if (attacker != null && attacker.userID != vPlayer.userID && !vPlayer.IsNpc && !attacker.IsNpc)
-                {
-                    Add(attacker.userID, "kills.player");
-
-                    // Highest range kill (players only)
-                    try
-                    {
-                        double range = info.ProjectileDistance > 0f
-                            ? info.ProjectileDistance
-                            : Vector3.Distance(attacker.eyes?.position ?? attacker.transform.position, vPlayer.transform.position);
-
-                        var c = Get(attacker.userID);
-                        if (range > c.highest_range_kill_m)
-                        {
-                            c.highest_range_kill_m = range;
-                        }
-                    }
-                    catch { /* ignore */ }
-                }
-                return;
-            }
-
-            // NPCs & Animals
-            if (victim is BaseNpc && attacker != null)
-            {
-                if (victim is BaseAnimalNPC) Add(attacker.userID, "kills.animal");
-                else Add(attacker.userID, "kills.npc");
-            }
+            if (attacker != null && attacker.userID != 0 && !attacker.IsNpc && attacker.userID != vp.userID)
+                Add(attacker.userID, "kills.npc");
+            return;
         }
 
-        private object OnWeaponFired(BaseProjectile proj, BasePlayer player, ItemModProjectile mod, ProtoBuf.ProjectileShoot shoot)
+        // Real player death
+        Add(vp.userID, "deaths");
+
+        if (attacker != null && attacker.userID != vp.userID && !attacker.IsNpc)
         {
-            if (player == null || proj == null) return null;
-            var ammo = proj.primaryMagazine?.ammoType?.shortname ?? "";
+            Add(attacker.userID, "kills.player");
+
+            // Highest range kill (max)
+            try
+            {
+                var range = info.ProjectileDistance > 0f
+                    ? info.ProjectileDistance
+                    : Vector3.Distance(attacker.eyes?.position ?? attacker.transform.position, vp.transform.position);
+                var c = Get(attacker.userID);
+                if (range > c.highest_range_kill_m)
+                    c.highest_range_kill_m = range;
+            }
+            catch { /* ignore */ }
+        }
+        return;
+    }
+
+    // ----- Animals / non-player NPC prefabs (rare) -----
+    if (attacker != null && !attacker.IsNpc)
+    {
+        var n = (victim.ShortPrefabName ?? string.Empty).ToLowerInvariant();
+        if (n.Contains("boar") || n.Contains("stag") || n.Contains("wolf") || n.Contains("bear") || n.Contains("chicken") || n.Contains("horse"))
+            Add(attacker.userID, "kills.animal");
+        else if (n.Contains("scientist") || n.Contains("tunneldweller") || n.Contains("underwaterdweller")
+              || n.Contains("bandit") || n.Contains("murderer") || n.Contains("scarecrow"))
+            Add(attacker.userID, "kills.npc");
+    }
+}
+
+
+
+        // simple signature
+        private object OnWeaponFired(BaseProjectile proj, BasePlayer player)
+        {
+            var ammo = proj?.primaryMagazine?.ammoType?.shortname ?? "";
+            var kind = RocketKindFromAmmo(ammo);
+            if (kind != null)
+            {
+                CountRocketByKind(player, kind);
+                return null;
+            }
+
+            // non-rocket: bucket bullets/arrows as you already do
             var bucket = AmmoBucket(ammo);
-
             if (bucket == "rocket")
             {
-                Add(player.userID, "rockets.fired");
+                // In rare cases shortname may be generic; treat as basic fallback
+                CountRocketByKind(player, "basic");
             }
             else
             {
                 Add(player.userID, $"bullets.{bucket}");
             }
-
             return null;
         }
+private void OnRocketLaunched(BasePlayer player, BaseEntity rocket)
+{
+    var kind = RocketKindFromEntity(rocket) ?? "basic";
+    CountRocketByKind(player, kind);
+}
 
-        // Thrown explosives (F1, beancan, etc.)
-        private void OnExplosiveThrown(ThrownWeapon weapon, BasePlayer player)
-        {
-            if (player == null || weapon == null) return;
-            var name = (weapon?.ShortPrefabName ?? "").ToLowerInvariant();
-            if (name.Contains("grenade.f1")) Add(player.userID, "explosive.f1");
-            else if (name.Contains("grenade.beancan")) Add(player.userID, "explosive.beancan");
-            else if (name.Contains("explosive.satchel") || name.Contains("satchel")) Add(player.userID, "explosive.satchel");
-            else if (name.Contains("explosive.timed") || name.Contains("c4")) Add(player.userID, "explosive.c4"); // may be placed, not thrown
-            else Add(player.userID, "explosive.other");
-        }
-        #endregion
 
-        #region Looting (Airdrops / Hacked crates)
+
+
+        // ---------------- Looting (Airdrops / Hacked crates) ----------------
         private void OnLootEntityEnd(BasePlayer p, BaseEntity ent)
         {
             if (p == null || ent == null) return;
             var name = (ent.ShortPrefabName ?? "").ToLowerInvariant();
-            if (name == "supply_drop" || name.Contains("supply_drop")) Add(p.userID, "airdrops.collected");
+            if (name == "supply_drop" || name.Contains("supply_drop"))
+                Add(p.userID, "airdrops.collected");
             else if (name.Contains("hackable") || name.Contains("hackablecrate") || name.Contains("crate_elite_hackable"))
                 Add(p.userID, "hackedcrates.collected");
         }
-        #endregion
 
-        #region Gambling (enter/exit context via looting/opening the machine UI)
-        private void OnLootEntity(BasePlayer p, BaseEntity ent)
-        {
-            // Called when player opens loot UI; use as context start for casino machines
-            if (p == null || ent == null) return;
-            var ctx = GuessGameCtxFromEntity(ent);
-            if (ctx == GameCtx.None) return;
-
-            var s = GState(p.userID);
-            s.ctx = ctx;
-            s.lastScrap = CountScrap(p);
-            if (_cfg.LogDebug) Puts($"Gamble start {p.displayName} -> {ctx}, scrap={s.lastScrap}");
-        }
-
-        private void OnLootEntityEndHook(BasePlayer p, BaseEntity ent)
-        {
-            // helper if some builds use different hook names; not always needed
-            OnLootEntityEnd(p, ent);
-            ClearGamble(p);
-        }
-
-        private void OnLootEntityEnd(BasePlayer p, ItemContainer container)
-        {
-            // Some uMod builds use this signature; we simply clear context on any end
-            ClearGamble(p);
-        }
-
-        private void OnPlayerDisconnected(BasePlayer p, string reason)
-        {
-            ClearGamble(p);
-            _lastPos.Remove(p.userID);
-        }
-
-        private void ClearGamble(BasePlayer p)
-        {
-            if (p == null) return;
-            var s = GState(p.userID);
-            if (s.ctx != GameCtx.None)
-            {
-                // final scrap delta apply
-                UpdateGambleDelta(p);
-                if (_cfg.LogDebug) Puts($"Gamble end {p.displayName} ({s.ctx}) spent={s.spent} profit={s.profit}");
-            }
-            s.ctx = GameCtx.None;
-            s.spent = 0;
-            s.profit = 0;
-            s.lastScrap = CountScrap(p);
-        }
-        #endregion
-
-        #region Flush to API
-        [Serializable]
-        private class Payload
-        {
-            public long server_unix_time;
-            public List<Counters> players;
-        }
-
+        // ---------------- Flush to API ----------------
         private void FlushAll()
         {
             if (_stats.Count == 0) return;
 
-            // Build payload snapshot
             var snapshot = new Payload
             {
                 server_unix_time = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
@@ -463,55 +382,51 @@ namespace Oxide.Plugins
                 }).ToList()
             };
 
-            var json = JsonUtility.ToJson(snapshot);
-            if (_cfg.LogDebug) Puts($"Flushing {_stats.Count} players ({json.Length} bytes)");
+            var json = JsonConvert.SerializeObject(snapshot); // Newtonsoft is reliable on all builds
+
+            // backup locally for troubleshooting
+            try
+            {
+                var dir = $"{Interface.Oxide.DataDirectory}/{Name}";
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(Path.Combine(dir, "RustStatsExporter_LastBatch.json"), json);
+            }
+            catch { /* ignore backup errors */ }
+
+            if (_cfg.LogDebug) Puts($"[Flush] players={snapshot.players.Count}");
 
             var headers = new Dictionary<string, string> { { "Content-Type", "application/json" } };
             if (!string.IsNullOrEmpty(_cfg.ApiKey)) headers["X-API-Key"] = _cfg.ApiKey;
 
-            // Persist locally as a backup (non-rotating simple mirror)
-            Interface.Oxide.DataFileSystem.WriteObject("RustStatsExporter_LastBatch", snapshot, true);
-
-            webrequests.Enqueue(_cfg.ApiUrl, json, (code, response) =>
+        _web.Enqueue(
+            _cfg.ApiUrl,
+            json, // <-- post body (2nd arg)
+            (code, resp) =>
             {
-                if (code == 200 || code == 201 || code == 202)
+                if (code >= 200 && code < 300)
                 {
-                    // Clear counters on success
+                    Puts($"[Flush] OK {code}");
                     foreach (var c in _stats.Values) c.k.Clear();
-                    if (_cfg.LogDebug) Puts("Flush OK");
                 }
                 else
                 {
-                    PrintWarning($"Flush FAILED ({code}): {response}");
+                    PrintWarning($"[Flush] FAILED {code} {resp}");
                 }
-            }, this, Core.Libraries.RequestMethod.POST, headers, _cfg.FlushSeconds - 1f);
-        }
-        #endregion
+            },
+            this,
+            Core.Libraries.RequestMethod.POST,
+            headers,
+            30f
+        );
 
-        #region Chat command (debug)
-        [Command("rsx.stats")]
-        private void CmdStats(IPlayer iPlayer, string cmd, string[] args)
-        {
-            if (!iPlayer.IsAdmin) { iPlayer.Reply("Admin only."); return; }
-            if (args.Length == 0)
-            {
-                iPlayer.Reply("Usage: /rsx.stats <steamid|me> [key]");
-                return;
-            }
-            ulong id = args[0].Equals("me", StringComparison.OrdinalIgnoreCase) ? ulong.Parse(iPlayer.Id) : ulong.Parse(args[0]);
-            var c = Get(id);
-            if (args.Length == 1)
-            {
-                var top = string.Join(", ", c.k.OrderByDescending(kv => kv.Value).Take(10).Select(kv => $"{kv.Key}:{Math.Round(kv.Value,2)}"));
-                iPlayer.Reply($"Player {c.last_name} ({id}) top: {top}\nHighest range kill: {Math.Round(c.highest_range_kill_m,1)} m");
-            }
-            else
-            {
-                var key = args[1];
-                c.k.TryGetValue(key, out var v);
-                iPlayer.Reply($"{key} = {v}");
-            }
         }
-        #endregion
+
+        // ---------------- Console helper ----------------
+        [ConsoleCommand("rsx.flush")]
+        private void CC_Flush(ConsoleSystem.Arg arg)
+        {
+            FlushAll();
+            arg?.ReplyWith("flush queued");
+        }
     }
 }
