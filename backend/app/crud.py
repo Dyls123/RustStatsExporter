@@ -6,21 +6,35 @@ from . import models
 
 def upsert_player(db: Session, user_id: int, name: str, last_seen: int):
     p = db.get(models.Player, user_id)
+
+    new_name = (name or "").strip()
+    # a "name" that is just the SteamID digits
+    is_just_id = new_name.isdigit() and new_name == str(user_id)
+    
     if p:
         changed = False
-        if name and p.last_name != name:
-            p.last_name = name
+
+        # Only update the stored name if we have a *better* one
+        if new_name and not is_just_id and p.last_name != new_name:
+            p.last_name = new_name
             changed = True
+
         if last_seen and last_seen > (p.last_seen or 0):
             p.last_seen = last_seen
             changed = True
-        # no flush needed if row already exists
+
         return p
 
-    p = models.Player(user_id=user_id, last_name=name or str(user_id), last_seen=last_seen or 0)
+    # New player: if we don't have a proper name yet, fall back to ID string
+    p = models.Player(
+        user_id=user_id,
+        last_name=new_name or str(user_id),
+        last_seen=last_seen or 0,
+    )
     db.add(p)
-    db.flush()  # <<< CRITICAL: ensure row exists for FK inserts right after
+    db.flush()
     return p
+
 
 def add_counters(db: Session, user_id: int, kdict: dict) -> None:
     if not kdict:
